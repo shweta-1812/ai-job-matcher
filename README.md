@@ -224,4 +224,3 @@ This project is licensed under the MIT License.
 
 ---
 
-Made with ❤️ for job seekers in Germany/EU
