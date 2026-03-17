@@ -54,3 +54,8 @@ htmlcov/
 *.h5
 *.model
 *.bin
+
+IMPROVEMENTS.md 
+LATEST_FIXES.md
+IMPROVEMENTS_SUMMARY.md 
+CHANGELOG.md   
