@@ -7,24 +7,19 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.semantic_scorer import SemanticScorer
 from core.resume_parser_v2 import ResumeParser
 from core.jd_analyzer import JDAnalyzer
+from core.skill_extractor import SkillExtractor
 
-
-def normalize(text: str) -> str:
-    """Normalize text for comparison."""
-    text = (text or "").lower()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-# Initialize shared instances
 semantic_scorer = SemanticScorer()
 resume_parser = ResumeParser()
 jd_analyzer = JDAnalyzer()
+skill_extractor = SkillExtractor()  # shared instance (shared cache + rate limiter)
+
+TOP_N_LLM = 30  # re-analyze top N jobs with Groq
 
 EXPERIENCE_LEVEL_ORDER = {
     "Entry": 1,
@@ -103,30 +98,27 @@ def _job_text_for_scoring(job: dict) -> str:
 
 
 def rank_jobs(
-    resume_text: str, 
-    jobs: list[dict], 
+    resume_text: str,
+    jobs: list[dict],
     work_mode: str,
     experience_level_filter: str | None = None
 ):
     """
-    Returns:
-      ranked: list[tuple[score, idx]] sorted desc
-      resume_data: dict with parsed resume info
-      job_analyses: list[dict] aligned to jobs
-      remote_flags: list[bool] aligned to jobs
+    Two-pass ranking:
+    Pass 1 — regex skill extraction on all jobs → fast initial ranking
+    Pass 2 — Groq LLM re-extraction on top 30 → accurate matched/missing skills
     """
-
-    # ---- guards ----
     if not jobs:
         return [], {}, [], []
 
     resume_text = resume_text or ""
-    
-    # Parse resume once
+
+    # Parse resume with Groq (once)
     resume_data = resume_parser.parse(resume_text)
     resume_skills = resume_data["skills"]
     resume_level = resume_data["experience_level"]
 
+    # --- Pass 1: regex extraction on all jobs ---
     job_texts: list[str] = []
     job_analyses: list[dict] = []
     remote_flags: list[bool] = []
@@ -135,71 +127,89 @@ def rank_jobs(
         title = j.get("title", "") or ""
         desc = j.get("description") or ""
         loc = (j.get("location") or {}).get("display_name", "") or ""
-
         text = _job_text_for_scoring(j)
         job_texts.append(text)
-
-        # Analyze JD
-        analysis = jd_analyzer.analyze(text)
-        job_analyses.append(analysis)
-
+        job_analyses.append(jd_analyzer.analyze(text))
         remote_flags.append(is_remote_like(title, desc, loc))
 
+    semantic_scores = semantic_scorer.batch_score(resume_text, job_texts)
+
     scored: list[tuple[float, int]] = []
-    
-    # Batch encode all job descriptions at once (much faster)
-    job_texts_for_scoring = [_job_text_for_scoring(jobs[idx]) for idx in range(len(jobs))]
-    semantic_scores = semantic_scorer.batch_score(resume_text, job_texts_for_scoring)
-    
     for idx, j in enumerate(jobs):
         job_analysis = job_analyses[idx]
         job_skills = job_analysis["skills"]
         job_level = job_analysis["experience_level"]
-        
-        # Apply experience level filter if specified
+
         if experience_level_filter and experience_level_filter != "Any":
             if job_level != "Any" and job_level != experience_level_filter:
-                # Skip jobs that don't match the filter
-                # Allow one level flexibility (e.g., Mid can see Senior)
                 filter_rank = EXPERIENCE_LEVEL_ORDER.get(experience_level_filter, 0)
                 job_rank = EXPERIENCE_LEVEL_ORDER.get(job_level, 0)
                 if abs(filter_rank - job_rank) > 1:
                     continue
-        
-        # Semantic similarity (0-100 scale, already computed in batch)
-        sem_score = float(semantic_scores[idx]) / 100.0 if idx < len(semantic_scores) else 0.0
-        
-        # Skill overlap (0-1 scale)
-        skill_score = skill_overlap(resume_skills, job_skills)
-        
-        # Experience level match (0-1 scale)
-        exp_match = experience_level_match(resume_level, job_level)
-        
-        # Calculate number of matched skills (absolute count matters)
-        matched_skills_count = len(resume_skills & job_skills)
-        
-        # Skill match bonus: reward jobs where you have many of the required skills
-        skill_match_bonus = min(matched_skills_count / 10.0, 0.3)  # Up to 30% bonus for 10+ matched skills
-        
-        # Improved hybrid score with adjusted weights
-        # 35% semantic, 45% skills, 20% experience level
-        # Skills are now more important than semantic similarity
-        base_score = 0.35 * sem_score + 0.45 * skill_score + 0.20 * exp_match
-        
-        # Add skill match bonus
-        score = base_score + skill_match_bonus
-        
-        # Minimum threshold: if skill overlap is too low, penalize heavily
-        if skill_score < 0.2 and matched_skills_count < 3:
-            score *= 0.5  # Poor skill match, reduce score significantly
 
-        # Apply work mode preference penalty (not a hard filter)
+        sem_score = float(semantic_scores[idx]) / 100.0 if idx < len(semantic_scores) else 0.0
+        skill_score = skill_overlap(resume_skills, job_skills)
+        exp_match = experience_level_match(resume_level, job_level)
+        matched_count = len(resume_skills & job_skills)
+        job_skills_count = len(job_skills)
+
+        # 25% semantic, 55% skills, 20% experience — weights sum to 1.0, max score = 1.0
+        score = 0.25 * sem_score + 0.55 * skill_score + 0.20 * exp_match
+
+        if matched_count < 3:
+            score = min(score, 0.6)
+        elif matched_count < 5 and job_skills_count > 5:
+            score *= 0.7
+        elif skill_score < 0.3:
+            score *= 0.75
+
         if work_mode == "Remote" and not remote_flags[idx]:
             score *= 0.9
         elif work_mode == "On-site" and remote_flags[idx]:
             score *= 0.9
 
-        scored.append((score, idx))
+        scored.append((min(score, 1.0), idx))
 
     scored.sort(key=lambda x: x[0], reverse=True)
+
+    # --- Pass 2: Groq LLM re-extraction on top 30 ---
+    top_indices = [idx for _, idx in scored[:TOP_N_LLM]]
+    top_texts = [job_texts[idx] for idx in top_indices]
+
+    print(f"Running Groq LLM analysis on top {len(top_indices)} jobs...")
+    llm_skills_list = skill_extractor.extract_skills_batch_llm(top_texts, top_n=TOP_N_LLM)
+
+    # Update job_analyses AND recalculate scores with LLM skills
+    score_map = {idx: score for score, idx in scored}
+
+    for job_idx, llm_skills in zip(top_indices, llm_skills_list):
+        job_analyses[job_idx]["skills"] = llm_skills
+
+        # Recalculate score with accurate LLM skills
+        job_level = job_analyses[job_idx]["experience_level"]
+        matched_count = len(resume_skills & llm_skills)
+        job_skills_count = len(llm_skills)
+        skill_score = matched_count / job_skills_count if job_skills_count else 0.0
+        sem_score = float(semantic_scores[job_idx]) / 100.0
+        exp_match = experience_level_match(resume_level, job_level)
+
+        score = 0.25 * sem_score + 0.55 * skill_score + 0.20 * exp_match
+
+        if matched_count < 3:
+            score = min(score, 0.6)
+        elif matched_count < 5 and job_skills_count > 5:
+            score *= 0.7
+        elif skill_score < 0.3:
+            score *= 0.75
+
+        if work_mode == "Remote" and not remote_flags[job_idx]:
+            score *= 0.9
+        elif work_mode == "On-site" and remote_flags[job_idx]:
+            score *= 0.9
+
+        score_map[job_idx] = min(score, 1.0)
+
+    # Re-sort with updated scores
+    scored = sorted([(score_map[idx], idx) for _, idx in scored], key=lambda x: x[0], reverse=True)
+
     return scored, resume_data, job_analyses, remote_flags

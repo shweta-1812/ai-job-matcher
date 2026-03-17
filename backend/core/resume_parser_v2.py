@@ -38,7 +38,7 @@ class ResumeParser:
                 "years_of_experience": None
             }
         
-        skills = self.skill_extractor.extract_skills(resume_text)
+        skills = self.skill_extractor.extract_skills(resume_text, use_llm=True)
         years = self._extract_years_of_experience(resume_text)
         level = self._determine_experience_level(resume_text, years)
         

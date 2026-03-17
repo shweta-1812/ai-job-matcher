@@ -76,6 +76,20 @@ def _flexible_match(query: str, text: str) -> bool:
     return query_words[0] in text_lower
 
 
+def _simple_location_match(city: str, location: str) -> bool:
+    """
+    Simple case-insensitive location matching.
+    """
+    if not city or not location:
+        return True
+    
+    city_lower = city.lower().strip()
+    location_lower = location.lower().strip()
+    
+    # Check if city name appears anywhere in location
+    return city_lower in location_lower
+
+
 def _is_germany_eu_location(location: str) -> bool:
     """
     Check if location is in Germany or EU.
@@ -265,9 +279,9 @@ def search_jobs(country: str, page: int, what: str, where: str | None, results_p
                 continue
             
             if score > 0:
-                # Apply location filter early
+                # Apply location filter early (simple match)
                 location = j.get("location", "Remote")
-                if where and not _flexible_match(where, location):
+                if where and not _simple_location_match(where, location):
                     continue
                 scored_jobs.append((score, j))
         
