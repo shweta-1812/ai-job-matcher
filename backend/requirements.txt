@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+pydantic
+numpy
+scikit-learn
+pypdf
+python-docx
+python-multipart
+sentence-transformers
+keybert
