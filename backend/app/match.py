@@ -147,6 +147,12 @@ def rank_jobs(
                 if abs(filter_rank - job_rank) > 1:
                     continue
 
+        # Filter by work mode strictly
+        if work_mode == "Remote" and not remote_flags[idx]:
+            continue
+        if work_mode == "On-site" and remote_flags[idx]:
+            continue
+
         sem_score = float(semantic_scores[idx]) / 100.0 if idx < len(semantic_scores) else 0.0
         skill_score = skill_overlap(resume_skills, job_skills)
         exp_match = experience_level_match(resume_level, job_level)
@@ -162,11 +168,6 @@ def rank_jobs(
             score *= 0.7
         elif skill_score < 0.3:
             score *= 0.75
-
-        if work_mode == "Remote" and not remote_flags[idx]:
-            score *= 0.9
-        elif work_mode == "On-site" and remote_flags[idx]:
-            score *= 0.9
 
         scored.append((min(score, 1.0), idx))
 
@@ -201,11 +202,6 @@ def rank_jobs(
             score *= 0.7
         elif skill_score < 0.3:
             score *= 0.75
-
-        if work_mode == "Remote" and not remote_flags[job_idx]:
-            score *= 0.9
-        elif work_mode == "On-site" and remote_flags[job_idx]:
-            score *= 0.9
 
         score_map[job_idx] = min(score, 1.0)
 

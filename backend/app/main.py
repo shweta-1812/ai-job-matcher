@@ -1,12 +1,10 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .models import MatchRequest, JobMatch, ResumeAnalysis
+from .models import JobMatch, ResumeAnalysis
 from .resume_extract import extract_resume_text
-from .adzuna_client import search_jobs
+from .adzuna_client import search_jobs, enrich_descriptions
 from .match import rank_jobs
-from .salary_extractor import extract_salary, format_salary
-from fastapi import HTTPException
 import re, hashlib
 import logging
 
@@ -23,9 +21,6 @@ def _norm(s: str) -> str:
     s = (s or "").lower().strip()
     s = re.sub(r"\s+", " ", s)
     return s
-
-def _n(s: str) -> str:
-    return (s or "").strip().lower()
 
 def _strip_city_suffix(title: str) -> str:
     # Remove common " - City" / " – City" patterns and Remote-location tags
@@ -92,27 +87,26 @@ def detect_languages(text: str) -> dict:
     t = (text or "").lower()
 
     GERMAN_PATTERNS = [
-    r"\bgerman\b", r"\bdeutsch\b", r"\bdeutschkenntnisse\b",
-    r"\bverhandlungssicher(es)?\s+deutsch\b",
+    r"\bgerman\b", r"\bdeutsch\w*\b",
+    r"\bverhandlungssicher(es)?\s+deutsch\w*\b",
     r"\bsehr gute\s+deutschkenntnisse\b",
     ]
 
     ENGLISH_PATTERNS = [
-    r"\benglish\b", r"\benglisch\b",
+    r"\benglish\w*\b", r"\benglisch\w*\b",
     r"\bbusiness english\b",
-    r"\bverhandlungssicher(es)?\s+englisch\b",
+    r"\bverhandlungssicher(es)?\s+englisch\w*\b",
     ]
 
     # CEFR levels like C1, B2, etc. Often appear near a language word.
     CEFR_PATTERN = r"\b(a1|a2|b1|b2|c1|c2)\b"
 
-
     has_german_word = any(re.search(p, t) for p in GERMAN_PATTERNS)
     has_english_word = any(re.search(p, t) for p in ENGLISH_PATTERNS)
 
-    # Catch cases like "German (at least C1)" or "English skills (B2)"
-    german_cefr = bool(re.search(rf"\b(german|deutsch)\b.{0,40}{CEFR_PATTERN}", t))
-    english_cefr = bool(re.search(rf"\b(english|englisch)\b.{0,40}{CEFR_PATTERN}", t))
+    # Catch cases like "German (at least C1)" or "Deutsch (C1)"
+    german_cefr = bool(re.search(rf"\b(german|deutsch\w*)\b.{{0,40}}{CEFR_PATTERN}", t))
+    english_cefr = bool(re.search(rf"\b(english\w*|englisch\w*)\b.{{0,40}}{CEFR_PATTERN}", t))
 
     return {
         "german": has_german_word or german_cefr,
@@ -187,9 +181,10 @@ async def match_jobs(
     city: str | None = Form(None),
     pages: int = Form(2),
     results_per_page: int = Form(50),
-    work_mode: str = Form("Remote"),
+    work_mode: str = Form("Any"),
     language: str = Form("Any"),
     experience_level: str = Form("Any"),
+    date_posted: str = Form("Any time"),
 ):
     if pages < 1 or pages > 10:
         raise HTTPException(status_code=400, detail="pages must be 1..10")
@@ -209,10 +204,19 @@ async def match_jobs(
         logger.error(f"Error extracting resume: {e}")
         raise HTTPException(status_code=400, detail=f"Error reading resume: {str(e)}")
 
+    # Map date_posted label to max_days_old
+    date_to_days = {
+        "Past 24 hours": 1,
+        "Past week": 7,
+        "Past month": 30,
+        "Any time": None,
+    }
+    max_days_old = date_to_days.get(date_posted, None)
+
     jobs = []
     for p in range(1, pages + 1):
         try:
-            resp = search_jobs(country=country, page=p, what=job_title, where=city, results_per_page=results_per_page)
+            resp = search_jobs(country=country, page=p, what=job_title, where=city, results_per_page=results_per_page, max_days_old=max_days_old)
             jobs.extend(resp.get("results", []))
             logger.info(f"Page {p}: fetched {len(resp.get('results', []))} jobs from {resp.get('sources', {})}")
         except Exception as e:
@@ -230,6 +234,9 @@ async def match_jobs(
     jobs = dedupe_by_company_base_title(jobs)
     logger.info(f"Total jobs after deduplication: {len(jobs)}")
 
+    # Enrich Adzuna descriptions before language filtering
+    enrich_descriptions(jobs)
+
     # Filter jobs by language
     if language != "Any":
         filtered = []
@@ -238,9 +245,9 @@ async def match_jobs(
             desc = j.get("description", "")
             tag = language_tag_for(f"{title} {desc}")
 
-            if language == "German" and tag in ("German", "English & German","Unspecified"):
+            if language == "German" and tag in ("German", "English & German", "Unspecified"):
                 filtered.append(j)
-            elif language == "English" and tag in ("English", "English & German","Unspecified"):
+            elif language == "English" and tag in ("English", "Unspecified"):
                 filtered.append(j)
 
         jobs = filtered
@@ -261,7 +268,8 @@ async def match_jobs(
         )
         logger.info(f"Ranked {len(ranked)} jobs")
     except Exception as e:
-        logger.error(f"Error ranking jobs: {e}")
+        import traceback
+        logger.error(f"Error ranking jobs: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error ranking jobs: {str(e)}")
 
     results: list[JobMatch] = []
@@ -285,10 +293,6 @@ async def match_jobs(
         text_for_lang = f"{title} {desc}"
         lang_tag = language_tag_for(text_for_lang)
         
-        # Extract salary
-        salary_info = extract_salary(desc)
-        salary_str = format_salary(salary_info)
-        
         results.append(JobMatch(
             match_percentage=float(score * 100),
             title=title,
@@ -300,7 +304,6 @@ async def match_jobs(
             missing_skills=missing,
             language_tag=lang_tag,
             experience_level=job_analysis["experience_level"],
-            salary=salary_str,
             source=source,
             raw=j
         ))

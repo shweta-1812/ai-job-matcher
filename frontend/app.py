@@ -59,14 +59,19 @@ with col1:
     language = st.selectbox(
         "Language requirement",
         ["Any", "English", "German"] )
+    st.caption("⚠️ Language detection is best-effort — jobs with short descriptions may show as 'Unspecified' even if German is required.")
     experience_level = st.selectbox(
         "Experience level (optional)",
         ["Any", "Entry", "Mid", "Senior", "Lead"],
         help="Filter jobs by experience level. 'Any' shows all levels."
     )
+    date_posted = st.selectbox(
+        "Date posted",
+        ["Any time", "Past month", "Past week", "Past 24 hours"]
+    )
 
 with col2:
-    work_mode = st.radio("Work mode", ["Remote", "On-site"], horizontal=True)
+    work_mode = st.radio("Work mode", ["Any", "Remote", "On-site"], horizontal=True)
     country = st.selectbox("Country", ["de"], format_func=lambda x: "Germany")
     pages = st.slider("Pages to fetch", 1, 5, 2)
     results_per_page = st.slider("Results per page", 10, 50, 50)
@@ -88,6 +93,7 @@ if st.button("🔍 Find Matching Jobs", type="primary"):
                 "work_mode": work_mode,
                 "language": language,
                 "experience_level": experience_level,
+                "date_posted": date_posted,
             }
             r = requests.post(f"{BACKEND_URL}/match", files=files, data=data, timeout=120)
             
@@ -123,8 +129,7 @@ if st.button("🔍 Find Matching Jobs", type="primary"):
             remote_count = sum(1 for m in matches if m['remote_like'])
             st.metric("Remote Jobs", f"{remote_count}/{len(matches)}")
         with col_z:
-            with_salary = sum(1 for m in matches if m.get('salary') and m['salary'] != 'Not specified')
-            st.metric("Jobs with Salary", f"{with_salary}/{len(matches)}")
+            st.metric("Sources", len(set(m.get('source','') for m in matches)))
         
         st.divider()
         
@@ -148,10 +153,6 @@ if st.button("🔍 Find Matching Jobs", type="primary"):
                     st.write(f"{remote_icon} **{'Remote' if m['remote_like'] else 'On-site'}**")
                 with col_5:
                     st.write(f"🌍 **{m.get('language_tag', 'N/A')}**")
-                
-                # Salary
-                if m.get('salary') and m['salary'] != 'Not specified':
-                    st.write(f"💰 **Salary:** {m['salary']}")
                 
                 # Skills
                 if m.get("matched_skills"):

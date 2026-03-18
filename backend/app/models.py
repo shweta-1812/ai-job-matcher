@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, List, Literal, Dict, Any
 
-WorkMode = Literal["Remote", "On-site"]
+WorkMode = Literal["Any", "Remote", "On-site"]
 ExperienceLevel = Literal["Any", "Entry", "Mid", "Senior", "Lead"]
 
 class MatchRequest(BaseModel):
@@ -10,7 +10,7 @@ class MatchRequest(BaseModel):
     country: str = "de"
     pages: int = 2
     results_per_page: int = 50
-    work_mode: WorkMode = "Remote"
+    work_mode: WorkMode = "Any"
     experience_level: ExperienceLevel = "Any"
 
 class ResumeAnalysis(BaseModel):
@@ -30,6 +30,5 @@ class JobMatch(BaseModel):
     missing_skills: List[str]
     language_tag: str
     experience_level: str
-    salary: Optional[str] = None
     source: Optional[str] = None
     raw: Dict[str, Any]

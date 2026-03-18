@@ -1,40 +1,43 @@
 # AI Job Matcher 🎯
 
-AI-powered job matching platform that analyzes your resume and finds the best-fit jobs in Germany/EU. Uses semantic similarity, skill extraction, and experience matching to rank jobs by relevance.
+AI-powered job matching platform that analyzes your resume and finds the best-fit jobs in Germany/EU. Uses LLM-based skill extraction, semantic similarity, and experience matching to rank jobs by relevance.
 
 ## Features ✨
 
+- **LLM-Powered Skill Extraction**: Uses Groq (llama-3.1-8b) to accurately extract skills from resumes and job descriptions — handles any writing style, not just keyword lists
+- **Two-Pass Matching**: Fast regex scan ranks all jobs, then Groq re-analyzes the top 30 for accurate skill matching
 - **Smart Resume Analysis**: Extracts skills, experience level, and years of experience from your resume
-- **Multi-Source Job Search**: Integrates Adzuna, Remotive, and Arbeitnow APIs for comprehensive job listings
-- **Intelligent Matching**: Ranks jobs using:
-  - 45% Skill overlap
-  - 35% Semantic similarity (AI-powered)
+- **Intelligent Matching**: Ranks jobs using a weighted score (capped at 100%):
+  - 55% Skill overlap
+  - 25% Semantic similarity
   - 20% Experience level match
+- **Accurate Skill Sections**: Shows exactly which skills matched and which to develop, powered by LLM extraction
 - **Advanced Filtering**: Filter by location, experience level, language requirements, and work mode
 - **Salary Extraction**: Automatically extracts and displays salary information from job descriptions
 - **Germany/EU Focus**: Filters jobs specifically for German and EU markets
+- **Deduplication**: Removes duplicate job listings across sources
 
 ## Tech Stack 🛠️
 
 **Backend:**
-- FastAPI - Modern Python web framework
-- Sentence Transformers - Semantic similarity matching
-- KeyBERT - Skill extraction
+- FastAPI
+- Groq API (llama-3.1-8b-instant) — LLM skill extraction
+- Sentence Transformers — semantic similarity
 - Python 3.11+
 
 **Frontend:**
-- Streamlit - Interactive web interface
+- Streamlit
 
 **APIs:**
-- Adzuna API (primary source)
-- Remotive API (remote jobs)
-- Arbeitnow API (EU jobs)
+- Adzuna API (job listings)
+- Groq API (skill extraction)
 
 ## Installation 📦
 
 ### Prerequisites
-- Python 3.11 or higher
-- Adzuna API credentials (get free at https://developer.adzuna.com/)
+- Python 3.11+
+- Adzuna API credentials — free at https://developer.adzuna.com/
+- Groq API key — free at https://console.groq.com/
 
 ### Setup
 
@@ -44,34 +47,28 @@ git clone https://github.com/yourusername/ai-job-matcher.git
 cd ai-job-matcher
 ```
 
-2. Create and activate virtual environment:
+2. Create and activate a virtual environment:
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 ```
 
-3. Install backend dependencies:
+3. Install dependencies:
 ```bash
-cd backend
-pip install -r requirements.txt
+cd backend && pip install -r requirements.txt
+cd ../frontend && pip install -r requirements.txt
 ```
 
-4. Install frontend dependencies:
-```bash
-cd ../frontend
-pip install -r requirements.txt
-```
-
-5. Configure environment variables:
-Create `backend/.env` file:
+4. Configure environment variables in `backend/.env`:
 ```env
 ADZUNA_APP_ID=your_app_id
 ADZUNA_APP_KEY=your_app_key
+GROQ_API_KEY=your_groq_key
 ```
 
 ## Usage 🚀
 
-### Start Backend Server
+### Start Backend
 ```bash
 cd backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -83,35 +80,32 @@ cd frontend
 streamlit run app.py --server.port 8501
 ```
 
-### Access the Application
-Open your browser and go to: http://localhost:8501
+Open http://localhost:8501 in your browser.
 
 ## How It Works 🔍
 
-1. **Upload Resume**: Upload your resume (PDF, DOCX, or TXT)
-2. **Analyze Resume** (Optional): See what skills and experience level the system detected
-3. **Search Jobs**: Enter job title and preferences
-4. **Get Matches**: View ranked job matches with:
-   - Match percentage
-   - Matched skills
-   - Skills to develop
-   - Salary information
-   - Experience level
-   - Remote/On-site indicator
+1. **Upload Resume** — PDF, DOCX, or TXT
+2. **Analyze Resume** (optional) — preview detected skills and experience level
+3. **Search Jobs** — enter job title and filters
+4. **Get Matches** — view ranked results with match %, matched skills, skills to develop, salary, and experience level
 
 ## Matching Algorithm 📊
 
-The match percentage is calculated using:
-
 ```
-Base Score = (35% × Semantic Similarity) + (45% × Skill Overlap) + (20% × Experience Match)
-Skill Bonus = min(Matched Skills / 10, 0.3)  # Up to 30% bonus
-Final Score = (Base Score + Bonus) × Penalties
+Score = (25% × Semantic Similarity) + (55% × Skill Overlap) + (20% × Experience Match)
 ```
 
-**Penalties:**
-- Poor skill match (<20% overlap, <3 skills): 50% penalty
-- Work mode mismatch: 10% penalty
+**Penalties applied when:**
+- Fewer than 3 skills matched → capped at 60%
+- Fewer than 5 skills matched (job requires 5+) → 30% penalty
+- Less than 30% skill overlap → 25% penalty
+- Work mode mismatch → 10% penalty
+
+Score is always capped at 100%.
+
+**Two-pass skill extraction:**
+- Pass 1: regex scan on all jobs (fast, no API calls) → initial ranking
+- Pass 2: Groq LLM on top 30 jobs → accurate skill matching, score recalculated
 
 ## Project Structure 📁
 
@@ -119,17 +113,17 @@ Final Score = (Base Score + Bonus) × Penalties
 .
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI application
-│   │   ├── match.py             # Matching logic
-│   │   ├── adzuna_client.py     # Job fetching
+│   │   ├── main.py              # FastAPI application & endpoints
+│   │   ├── match.py             # Two-pass matching & scoring
+│   │   ├── adzuna_client.py     # Job search API client
 │   │   ├── models.py            # Pydantic models
-│   │   ├── resume_extract.py    # Resume parsing
+│   │   ├── resume_extract.py    # Resume file parsing
 │   │   └── salary_extractor.py  # Salary extraction
 │   ├── core/
-│   │   ├── semantic_scorer.py   # Semantic matching
-│   │   ├── skill_extractor.py   # Skill extraction
-│   │   ├── resume_parser_v2.py  # Resume analysis
-│   │   └── jd_analyzer.py       # Job description analysis
+│   │   ├── skill_extractor.py   # Groq LLM + regex skill extraction
+│   │   ├── resume_parser_v2.py  # Resume analysis (uses LLM)
+│   │   ├── jd_analyzer.py       # Job description analysis (uses regex)
+│   │   └── semantic_scorer.py   # Sentence transformer scoring
 │   └── requirements.txt
 ├── frontend/
 │   ├── app.py                   # Streamlit UI
@@ -140,37 +134,19 @@ Final Score = (Base Score + Bonus) × Penalties
 ## API Endpoints 🔌
 
 ### POST /analyze-resume
-Analyze resume and extract skills, experience level, and years of experience.
-
-**Request:**
-- `resume_upload`: File (PDF/DOCX/TXT)
-
-**Response:**
 ```json
+// Response
 {
-  "skills": ["python", "aws", "docker", ...],
+  "skills": ["python", "aws", "docker"],
   "experience_level": "Senior",
   "years_of_experience": 5,
-  "skill_count": 25
+  "skill_count": 12
 }
 ```
 
 ### POST /match
-Search and rank jobs based on resume.
-
-**Request:**
-- `resume_upload`: File
-- `job_title`: string
-- `country`: string (default: "de")
-- `city`: string (optional)
-- `pages`: int (1-10)
-- `results_per_page`: int (10-100)
-- `work_mode`: "Remote" | "On-site"
-- `language`: "Any" | "English" | "German"
-- `experience_level`: "Any" | "Entry" | "Mid" | "Senior" | "Lead"
-
-**Response:**
 ```json
+// Response
 [
   {
     "match_percentage": 78.5,
@@ -179,8 +155,8 @@ Search and rank jobs based on resume.
     "location": "Berlin, Germany",
     "url": "https://...",
     "remote_like": true,
-    "matched_skills": ["python", "tensorflow", ...],
-    "missing_skills": ["kubernetes", ...],
+    "matched_skills": ["python", "docker", "aws"],
+    "missing_skills": ["llm", "rag", "vector database"],
     "language_tag": "English & German",
     "experience_level": "Senior",
     "salary": "€70,000 - €90,000",
@@ -189,38 +165,19 @@ Search and rank jobs based on resume.
 ]
 ```
 
-## Configuration ⚙️
+## Environment Variables ⚙️
 
-### Environment Variables
-- `ADZUNA_APP_ID`: Your Adzuna application ID
-- `ADZUNA_APP_KEY`: Your Adzuna API key
-- `BACKEND_URL`: Backend URL (default: http://localhost:8000)
-
-## Contributing 🤝
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License 📄
-
-This project is licensed under the MIT License.
-
-## Acknowledgments 🙏
-
-- Adzuna API for job listings
-- Remotive for remote job data
-- Arbeitnow for EU job data
-- Sentence Transformers for semantic matching
-- KeyBERT for skill extraction
+| Variable | Description |
+|---|---|
+| `ADZUNA_APP_ID` | Adzuna application ID |
+| `ADZUNA_APP_KEY` | Adzuna API key |
+| `GROQ_API_KEY` | Groq API key (free tier: 30 req/min, 14,400/day) |
+| `BACKEND_URL` | Backend URL (default: http://localhost:8000) |
 
 ## Future Improvements 🚀
 
-- [ ] Caching for job results
-- [ ] User authentication and saved searches
-- [ ] Job alerts and notifications
+- [ ] Saved searches and job alerts
+- [ ] Export results to CSV/PDF
 - [ ] More job sources
 - [ ] Company information integration
-- [ ] Export results to CSV/PDF
-- [ ] Advanced analytics dashboard
-
----
-
+- [ ] Analytics dashboard

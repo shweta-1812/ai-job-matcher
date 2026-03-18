@@ -1,9 +1,9 @@
 import os
 import requests
 import logging
-from typing import List, Dict, Any
-from urllib.parse import urlencode
+from typing import Dict, Any
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 # Load environment variables from backend/.env
@@ -47,33 +47,6 @@ def _match_score(query: str, text: str) -> float:
         return 0.4
     
     return 0.0
-
-
-def _flexible_match(query: str, text: str) -> bool:
-    """
-    Strict matching for multi-word queries:
-    - For "AI engineer", REQUIRES "AI" to be present
-    - For single words, just checks if present
-    """
-    query_lower = query.lower().strip()
-    text_lower = text.lower()
-    
-    # Exact phrase match
-    if query_lower in text_lower:
-        return True
-    
-    # Split into words (filter out short words like "a", "an", "the")
-    query_words = [w for w in query_lower.split() if len(w) > 2]
-    if not query_words:
-        return False
-    
-    # For multi-word queries, REQUIRE the first word (specialization)
-    if len(query_words) > 1:
-        # First word MUST be present
-        return query_words[0] in text_lower
-    
-    # For single-word queries, just check if it's present
-    return query_words[0] in text_lower
 
 
 def _simple_location_match(city: str, location: str) -> bool:
@@ -123,7 +96,114 @@ def _is_germany_eu_location(location: str) -> bool:
     return any(keyword in location_lower for keyword in all_keywords)
 
 
-def search_jobs(country: str, page: int, what: str, where: str | None, results_per_page: int = 50) -> Dict[str, Any]:
+def fetch_full_description(redirect_url: str) -> str | None:
+    """
+    Follow the Adzuna redirect_url and scrape the full job description.
+    Returns the cleaned text, or None if scraping fails.
+    """
+    if not redirect_url:
+        return None
+    try:
+        from bs4 import BeautifulSoup
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        r = requests.get(redirect_url, headers=headers, timeout=10, allow_redirects=True)
+        if not r.ok:
+            return None
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Remove noise tags
+        for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form"]):
+            tag.decompose()
+
+        # Try common job description containers first
+        for selector in [
+            "[class*='job-description']",
+            "[class*='jobDescription']",
+            "[class*='description']",
+            "[id*='job-description']",
+            "[id*='jobDescription']",
+            "article",
+            "main",
+        ]:
+            el = soup.select_one(selector)
+            if el:
+                text = el.get_text(separator=" ", strip=True)
+                if len(text) > 200:
+                    return text[:8000]  # cap at 8k chars for Groq
+
+        # Fallback: body text
+        body = soup.find("body")
+        if body:
+            text = body.get_text(separator=" ", strip=True)
+            if len(text) > 200:
+                return text[:8000]
+
+        return None
+
+    except Exception as e:
+        logger.debug(f"Failed to scrape {redirect_url}: {e}")
+        return None
+
+
+def enrich_descriptions(jobs: list) -> None:
+    """
+    Fetch full descriptions for Adzuna jobs in parallel.
+    Only enriches jobs where source == "Adzuna" (others already have full descriptions).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    adzuna_jobs = [
+        (i, j) for i, j in enumerate(jobs)
+        if j.get("source") == "Adzuna"
+    ]
+
+    if not adzuna_jobs:
+        return
+
+    def fetch_one(idx_job):
+        idx, job = idx_job
+        full = fetch_full_description(job.get("redirect_url", ""))
+        return idx, full
+
+    enriched = 0
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_one, ij): ij for ij in adzuna_jobs}
+        for future in as_completed(futures):
+            try:
+                idx, full = future.result()
+                if full and len(full) > len(jobs[idx].get("description", "")):
+                    jobs[idx]["description"] = full
+                    enriched += 1
+            except Exception as e:
+                logger.debug(f"Enrichment future failed: {e}")
+
+    logger.info(f"Enriched {enriched}/{len(adzuna_jobs)} Adzuna job descriptions via parallel scraping")
+
+
+def _is_within_days(date_str: str, max_days: int) -> bool:
+    """Return True if date_str is within the last max_days days. Returns True if date can't be parsed."""
+    if not date_str:
+        return True
+    try:
+        # Handle ISO 8601 with or without timezone (e.g. "2024-01-15T10:30:00Z")
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
+        return dt >= cutoff
+    except (ValueError, TypeError):
+        return True  # If we can't parse, don't filter it out
+
+
+def search_jobs(country: str, page: int, what: str, where: str | None, results_per_page: int = 50, max_days_old: int | None = None) -> Dict[str, Any]:
     """
     Multi-source job search with Adzuna as primary source.
     
@@ -159,6 +239,9 @@ def search_jobs(country: str, page: int, what: str, where: str | None, results_p
             if where:
                 params["where"] = where
             
+            if max_days_old:
+                params["max_days_old"] = max_days_old
+            
             r = requests.get(base_url, params=params, timeout=30)
             r.raise_for_status()
             
@@ -171,6 +254,10 @@ def search_jobs(country: str, page: int, what: str, where: str | None, results_p
                 
                 # Filter by Germany/EU location
                 if not _is_germany_eu_location(location):
+                    continue
+                
+                # Filter by date posted
+                if max_days_old and not _is_within_days(job.get("created", ""), max_days_old):
                     continue
                 
                 # Calculate relevance score
@@ -239,6 +326,10 @@ def search_jobs(country: str, page: int, what: str, where: str | None, results_p
             if not _is_germany_eu_location(location):
                 continue
             
+            # Filter by date posted
+            if max_days_old and not _is_within_days(job.get("publication_date", ""), max_days_old):
+                continue
+            
             all_jobs.append({
                 "title": job.get("title", ""),
                 "company": {"display_name": job.get("company_name", "")},
@@ -294,6 +385,10 @@ def search_jobs(country: str, page: int, what: str, where: str | None, results_p
             
             # Filter by Germany/EU location
             if not _is_germany_eu_location(location):
+                continue
+            
+            # Filter by date posted
+            if max_days_old and not _is_within_days(job.get("created_at", ""), max_days_old):
                 continue
             
             all_jobs.append({
