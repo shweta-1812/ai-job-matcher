@@ -2,6 +2,7 @@
 Enhanced resume parser that extracts structured information including skills and experience level.
 """
 import re
+from datetime import date
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Set
@@ -73,20 +74,33 @@ class ResumeParser:
         date_pattern = r'(20\d{2}|19\d{2})\s*[-–—]\s*(20\d{2}|19\d{2}|present|current)'
         date_matches = re.findall(date_pattern, text_lower, re.IGNORECASE)
         
-        total_years = 0
+        intervals = []
         for start, end in date_matches:
             try:
                 start_year = int(start)
                 if end.lower() in ('present', 'current'):
-                    end_year = 2024  # Current year
+                    end_year = date.today().year
                 else:
                     end_year = int(end)
-                total_years += max(0, end_year - start_year)
+                if 1900 <= start_year <= end_year <= date.today().year:
+                    intervals.append((start_year, end_year))
             except ValueError:
                 continue
         
-        if total_years > 0:
-            years_found.append(total_years)
+        # Merge overlapping employment intervals to avoid double-counting.
+        # Year-only dates remain an approximation; month precision is future work.
+        if intervals:
+            intervals.sort()
+            merged = [intervals[0]]
+            for start, end in intervals[1:]:
+                last_start, last_end = merged[-1]
+                if start <= last_end:
+                    merged[-1] = (last_start, max(last_end, end))
+                else:
+                    merged.append((start, end))
+            total_years = sum(end - start for start, end in merged)
+            if total_years > 0:
+                years_found.append(total_years)
         
         # Return the maximum found (most conservative estimate)
         return max(years_found) if years_found else None
