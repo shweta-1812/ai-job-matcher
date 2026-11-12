@@ -6,6 +6,13 @@ import hashlib
 from typing import Optional, Set
 
 from dotenv import load_dotenv
+from backend.core.llm.provider import get_llm_provider
+
+"""
+Two-mode skill extractor:
+- use_llm=False → fast regex scan (bulk job ranking)
+- use_llm=True  → configured LLM provider (Azure or Groq)
+"""
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -21,10 +28,15 @@ class SkillExtractor:
     """
 
     def __init__(self, top_n: int = 35, **kwargs):
-        self._groq_client = None
+        self._llm_client = None
         self._cache: dict = {}
         self._last_call_time: float = 0
-        self._init_groq()
+        self._provider_name = os.getenv("LLM_PROVIDER", "groq").strip().lower()
+
+        try:
+            self._llm_client = get_llm_provider()
+        except Exception as e:
+            print(f"LLM provider initialization failed: {e}")
 
         self.core_tools = {
             # Languages
@@ -82,28 +94,23 @@ class SkillExtractor:
             "ci cd": "cicd",
         }
 
-    def _init_groq(self):
-        try:
-            from groq import Groq
-            api_key = os.getenv("GROQ_API_KEY")
-            if api_key:
-                self._groq_client = Groq(api_key=api_key)
-        except Exception as e:
-            print(f"Groq init failed: {e}")
-
     def _normalize(self, phrase: str) -> str:
         p = phrase.strip().lower()
         p = re.sub(r"\s+", " ", p)
         return self.normalize_map.get(p, p)
 
-    def _call_groq(self, text: str) -> Optional[Set[str]]:
-        """Single rate-limited Groq call."""
-        if not self._groq_client:
+
+    def _call_llm(self, text: str) -> Optional[Set[str]]:
+        """Extract skills using the configured LLM provider."""
+        if not self._llm_client:
             return None
+
         try:
-            elapsed = time.time() - self._last_call_time
-            if elapsed < _MIN_INTERVAL:
-                time.sleep(_MIN_INTERVAL - elapsed)
+            # Preserve the existing Groq free-tier rate limit.
+            if self._provider_name == "groq":
+                elapsed = time.monotonic() - self._last_call_time
+                if elapsed < _MIN_INTERVAL:
+                    time.sleep(_MIN_INTERVAL - elapsed)
 
             prompt = f"""Extract all technical skills, tools, technologies, frameworks, programming languages,
 methodologies, and platforms mentioned in the following text.
@@ -121,30 +128,34 @@ Text:
 
 Return only the JSON array:"""
 
-            self._last_call_time = time.time()
-            response = self._groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=500,
-            )
+            if self._provider_name == "groq":
+                self._last_call_time = time.monotonic()
 
-            raw = response.choices[0].message.content.strip()
-            m = re.search(r'\[.*?\]', raw, re.DOTALL)
-            if not m:
+            raw = self._llm_client.complete(prompt)
+            if not isinstance(raw, str):
+                return None
+
+            match = re.search(r"\[.*?\]", raw, re.DOTALL)
+            if not match:
+                return None
+
+            parsed = json.loads(match.group())
+            if not isinstance(parsed, list):
                 return None
 
             skills = set()
-            for item in json.loads(m.group()):
+            for item in parsed:
                 if isinstance(item, str) and item.strip():
-                    n = self._normalize(item)
-                    if len(n) >= 2:
-                        skills.add(n)
+                    normalized = self._normalize(item)
+                    if len(normalized) >= 2:
+                        skills.add(normalized)
+
             return skills
 
         except Exception as e:
-            print(f"Groq call failed: {e}")
+            print(f"{self._provider_name} LLM call failed: {e}")
             return None
+
 
     def _extract_with_regex(self, text: str) -> Set[str]:
         """Fast regex scan — used for bulk job ranking."""
@@ -164,11 +175,11 @@ Return only the JSON array:"""
         if not text or not text.strip():
             return set()
 
-        cache_key = hashlib.md5((text + str(use_llm)).encode()).hexdigest()
+        cache_key = hashlib.md5((self._provider_name + text + str(use_llm)).encode()).hexdigest()
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        skills = self._call_groq(text) if use_llm else None
+        skills = self._call_llm(text) if use_llm else None
         if skills is None:
             skills = self._extract_with_regex(text)
 
@@ -177,7 +188,7 @@ Return only the JSON array:"""
 
     def extract_skills_batch_llm(self, texts: list, top_n: int = 30) -> list:
         """
-        Run Groq on up to top_n texts with rate limiting.
+        Run llm on up to top_n texts with rate limiting.
         Returns list of skill sets aligned to input.
         """
         results = []
